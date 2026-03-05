@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen" />
+  <title>Gaze Shooter VR</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babylonjs/6.26.0/babylon.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #000; overflow: hidden; width: 100vw; height: 100vh; }
+    #renderCanvas { width: 100%; height: 100%; touch-action: none; }
+    #startScreen {
+      position: fixed; inset: 0;
+      background: radial-gradient(ellipse at center, #0a0a2e 0%, #000 100%);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 10; color: white; text-align: center;
+      font-family: 'Courier New', monospace;
+    }
+    #startScreen h1 {
+      font-size: clamp(2rem, 8vw, 4rem);
+      color: #00ffcc; text-shadow: 0 0 30px #00ffcc;
+      margin-bottom: 1rem; letter-spacing: 4px;
+    }
+    #startScreen p { color: #aaa; margin-bottom: 2rem; font-size: 1rem; }
+    #startBtn {
+      background: transparent; border: 2px solid #00ffcc;
+      color: #00ffcc; padding: 1rem 3rem;
+      font-size: 1.2rem; font-family: inherit;
+      cursor: pointer; letter-spacing: 2px;
+      transition: all 0.3s;
+    }
+    #startBtn:hover { background: #00ffcc22; box-shadow: 0 0 20px #00ffcc; }
+    #hud {
+      position: fixed; top: 0; left: 0; right: 0;
+      display: none; justify-content: space-between;
+      padding: 1rem 2rem; color: #00ffcc;
+      font-family: 'Courier New', monospace;
+      font-size: 1.2rem; pointer-events: none; z-index: 5;
+    }
+    #gameOver {
+      position: fixed; inset: 0;
+      background: #00000099;
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      color: white; font-family: 'Courier New', monospace;
+      text-align: center; z-index: 10;
+    }
+    #gameOver h2 { font-size: 3rem; color: #ff4444; margin-bottom: 1rem; }
+    #restartBtn {
+      background: transparent; border: 2px solid #fff;
+      color: #fff; padding: 0.8rem 2rem;
+      font-size: 1rem; font-family: inherit;
+      cursor: pointer; margin-top: 1rem;
+    }
+  </style>
+</head>
+<body>
+<canvas id="renderCanvas"></canvas>
+<div id="startScreen">
+  <h1>⚡ GAZE SHOOTER</h1>
+  <p>Put your phone in Cardboard.<br/>Look at enemies to destroy them.</p>
+  <button id="startBtn">TAP TO LAUNCH</button>
+</div>
+<div id="hud">
+  <span id="scoreDisplay">SCORE: 0</span>
+  <span id="waveDisplay">WAVE 1</span>
+  <span id="livesDisplay">❤️❤️❤️</span>
+</div>
+<div id="gameOver">
+  <h2>GAME OVER</h2>
+  <p id="finalScore"></p>
+  <button id="restartBtn">PLAY AGAIN</button>
+</div>
+<script>
+// ─── STATE ───────────────────────────────────────────────────
+let score = 0, wave = 1, lives = 3;
+let enemies = [], gazeTarget = null, gazeDuration = 0;
+let gameActive = false;
+const DWELL_TIME = 1.5;
+const ENEMY_SPEED = 0.03;
+const SPAWN_RADIUS = 25;
+// ─── ENGINE & SCENE ──────────────────────────────────────────
+const canvas = document.getElementById('renderCanvas');
+const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true });
+const scene = new BABYLON.Scene(engine);
+scene.clearColor = new BABYLON.Color4(0, 0, 0.05, 1);
+// ─── CAMERA: VRDeviceOrientationFreeCamera = gyro + stereo ───
+const camera = new BABYLON.VRDeviceOrientationFreeCamera(
+  "vrCam",
+  new BABYLON.Vector3(0, 0, 0),
+  scene,
+  true // compensate distortion
+);
+camera.setTarget(new BABYLON.Vector3(0, 0, -1));
+camera.attachControl(canvas, true);
+// ─── LIGHTING ────────────────────────────────────────────────
+const ambient = new BABYLON.HemisphericLight("amb", new BABYLON.Vector3(0,1,0), scene);
+ambient.intensity = 0.4;
+ambient.diffuse = new BABYLON.Color3(0.2, 0.5, 1);
+// ─── STARFIELD ───────────────────────────────────────────────
+const starSPS = new BABYLON.SolidParticleSystem("stars", scene);
+const starBox = BABYLON.MeshBuilder.CreateBox("sb", {size: 0.05}, scene);
+starSPS.addShape(starBox, 300);
+starBox.dispose();
+const starMesh = starSPS.buildMesh();
+const starMat = new BABYLON.StandardMaterial("starMat", scene);
+starMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+starMesh.material = starMat;
+starSPS.initParticles = () => {
+  for (let i = 0; i < starSPS.nbParticles; i++) {
+    const p = starSPS.particles[i];
+    p.position.x = (Math.random() - 0.5) * 80;
+    p.position.y = (Math.random() - 0.5) * 80;
+    p.position.z = (Math.random() - 0.5) * 80;
+    p.color = new BABYLON.Color4(1, 1, 1, Math.random() * 0.8 + 0.2);
+  }
+};
+starSPS.initParticles();
+starSPS.setParticles();
+// ─── COCKPIT FRAME ───────────────────────────────────────────
+function buildCockpit() {
+  const mat = new BABYLON.StandardMaterial("cockpitMat", scene);
+  mat.emissiveColor = new BABYLON.Color3(0, 0.8, 0.6);
+  mat.wireframe = true;
+  // Bottom frame ring
+  const ring = BABYLON.MeshBuilder.CreateTorus("ring", {
+    diameter: 3, thickness: 0.05, tessellation: 8
+  }, scene);
+  ring.position.y = -1.2;
+  ring.material = mat;
+  // Side struts
+  for (let i = 0; i < 4; i++) {
+    const strut = BABYLON.MeshBuilder.CreateBox("strut" + i, {
+      width: 0.04, height: 2, depth: 0.04
+    }, scene);
+    const angle = (i / 4) * Math.PI * 2;
+    strut.position.x = Math.cos(angle) * 1.4;
+    strut.position.z = Math.sin(angle) * 1.4;
+    strut.position.y = -0.2;
+    strut.material = mat;
+  }
+  // HUD panel (billboard-style indicator at bottom)
+  const panel = BABYLON.MeshBuilder.CreatePlane("panel", {width: 2, height: 0.3}, scene);
+  panel.position.set(0, -0.9, -1.8);
+  const panelMat = new BABYLON.StandardMaterial("panelMat", scene);
+  panelMat.emissiveColor = new BABYLON.Color3(0, 0.4, 0.3);
+  panelMat.backFaceCulling = false;
+  panel.material = panelMat;
+}
+buildCockpit();
+// ─── RETICLE ─────────────────────────────────────────────────
+const reticleOuter = BABYLON.MeshBuilder.CreateTorus("reticleO", {
+  diameter: 0.15, thickness: 0.008, tessellation: 32
+}, scene);
+const reticleInner = BABYLON.MeshBuilder.CreateDisc("reticleI", {
+  radius: 0.015, tessellation: 16
+}, scene);
+[reticleOuter, reticleInner].forEach(m => {
+  const mat = new BABYLON.StandardMaterial("rMat" + m.name, scene);
+  mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+  mat.backFaceCulling = false;
+  m.material = mat;
+  m.isPickable = false;
+});
+// fill arc for dwell timer
+const reticleFill = BABYLON.MeshBuilder.CreateTorus("reticleF", {
+  diameter: 0.15, thickness: 0.012, tessellation: 32
+}, scene);
+const fillMat = new BABYLON.StandardMaterial("fillMat", scene);
+fillMat.emissiveColor = new BABYLON.Color3(0, 1, 0.6);
+reticleFill.material = fillMat;
+reticleFill.isPickable = false;
+reticleFill.scaling.x = 0;
+function updateReticle(dt) {
+  // Position 2m in front of camera
+  const forward = camera.getForwardRay().direction;
+  const pos = camera.position.add(forward.scale(2));
+  [reticleOuter, reticleInner, reticleFill].forEach(m => {
+    m.position = pos;
+    m.lookAt(camera.position);
+  });
+  // Fill
+  const fill = Math.min(dt / DWELL_TIME, 1);
+  reticleFill.scaling.x = fill;
+  reticleFill.scaling.y = fill;
+  fillMat.emissiveColor = fill > 0.8
+    ? new BABYLON.Color3(1, 0.3, 0)
+    : new BABYLON.Color3(0, 1, 0.6);
+}
+// ─── ENEMY FACTORY ───────────────────────────────────────────
+const enemyMat = new BABYLON.StandardMaterial("enemyMat", scene);
+enemyMat.emissiveColor = new BABYLON.Color3(1, 0.2, 0.2);
+const enemyMatAlt = new BABYLON.StandardMaterial("enemyMatAlt", scene);
+enemyMatAlt.emissiveColor = new BABYLON.Color3(1, 0.6, 0);
+function spawnEnemy() {
+  const theta = Math.random() * Math.PI * 2;
+  const phi = (Math.random() * 0.6 + 0.2) * Math.PI; // mostly in front hemisphere
+  const r = SPAWN_RADIUS;
+  const pos = new BABYLON.Vector3(
+    r * Math.sin(phi) * Math.cos(theta),
+    r * Math.sin(phi) * Math.sin(theta) * 0.5, // flatten vertically a bit
+    r * Math.cos(phi)
+  );
+  const size = 0.6 + Math.random() * 0.6;
+  const enemy = BABYLON.MeshBuilder.CreateIcoSphere("enemy_" + Date.now(), {
+    radius: size, subdivisions: 2
+  }, scene);
+  enemy.position = pos;
+  enemy.material = Math.random() > 0.3 ? enemyMat : enemyMatAlt;
+  enemy.metadata = { hp: 1, size };
+  enemies.push(enemy);
+}
+// ─── EXPLOSION EFFECT ────────────────────────────────────────
+function explode(pos) {
+  const ps = new BABYLON.ParticleSystem("exp", 60, scene);
+  ps.emitter = pos.clone();
+  ps.minSize = 0.05; ps.maxSize = 0.3;
+  ps.minLifeTime = 0.3; ps.maxLifeTime = 0.8;
+  ps.emitRate = 200;
+  ps.minEmitPower = 3; ps.maxEmitPower = 8;
+  ps.createSphereEmitter(0.2);
+  ps.color1 = new BABYLON.Color4(1, 0.5, 0, 1);
+  ps.color2 = new BABYLON.Color4(1, 0, 0, 0.5);
+  ps.colorDead = new BABYLON.Color4(0, 0, 0, 0);
+  ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
+  ps.start();
+  setTimeout(() => ps.stop(), 200);
+  setTimeout(() => ps.dispose(), 1500);
+}
+// ─── KILL ENEMY ──────────────────────────────────────────────
+function killEnemy(mesh) {
+  explode(mesh.position.clone());
+  mesh.dispose();
+  enemies = enemies.filter(e => e !== mesh);
+  score += 10 * wave;
+  document.getElementById('scoreDisplay').textContent = `SCORE: ${score}`;
+  gazeTarget = null;
+  gazeDuration = 0;
+}
+// ─── LOSE LIFE ───────────────────────────────────────────────
+function loseLife(mesh) {
+  mesh.dispose();
+  enemies = enemies.filter(e => e !== mesh);
+  lives--;
+  const hearts = '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, 3 - lives));
+  document.getElementById('livesDisplay').textContent = hearts;
+  if (lives <= 0) endGame();
+}
+// ─── WAVE MANAGEMENT ─────────────────────────────────────────
+let spawnInterval;
+function startWave() {
+  document.getElementById('waveDisplay').textContent = `WAVE ${wave}`;
+  clearInterval(spawnInterval);
+  const spawnRate = Math.max(800, 2000 - wave * 200);
+  const count = 3 + wave;
+  let spawned = 0;
+  spawnInterval = setInterval(() => {
+    if (spawned < count && gameActive) { spawnEnemy(); spawned++; }
+    else clearInterval(spawnInterval);
+  }, spawnRate);
+}
+// ─── MAIN GAME LOOP ──────────────────────────────────────────
+scene.registerBeforeRender(() => {
+  if (!gameActive) return;
+  const dt = engine.getDeltaTime() / 1000;
+  // Move enemies toward origin
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    if (!e || e.isDisposed()) { enemies.splice(i, 1); continue; }
+    const dir = BABYLON.Vector3.Zero().subtract(e.position).normalize();
+    e.position.addInPlace(dir.scale(ENEMY_SPEED * (1 + wave * 0.1)));
+    e.rotate(BABYLON.Axis.Y, 0.02);
+    // Hit player
+    if (e.position.length() < 1.5) { loseLife(e); continue; }
+  }
+  // Check next wave
+  if (enemies.length === 0 && gameActive) {
+    wave++;
+    document.getElementById('waveDisplay').textContent = `WAVE ${wave}`;
+    startWave();
+  }
+  // Gaze raycasting
+  const ray = camera.getForwardRay(100);
+  const hit = scene.pickWithRay(ray, m => m.name.startsWith("enemy"));
+  if (hit?.pickedMesh) {
+    if (hit.pickedMesh === gazeTarget) {
+      gazeDuration += dt;
+      if (gazeDuration >= DWELL_TIME) killEnemy(gazeTarget);
+    } else {
+      gazeTarget = hit.pickedMesh;
+      gazeDuration = 0;
+    }
+    updateReticle(gazeDuration);
+  } else {
+    gazeTarget = null;
+    gazeDuration = 0;
+    updateReticle(0);
+  }
+});
+// ─── RENDER LOOP ─────────────────────────────────────────────
+engine.runRenderLoop(() => scene.render());
+window.addEventListener('resize', () => engine.resize());
+// ─── GAME FLOW ───────────────────────────────────────────────
+async function startGame() {
+  // iOS 13+ gyro permission — don't block game if denied (mouse still works)
+  if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
+    try {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== 'granted') {
+        console.warn('Gyro permission denied — mouse/touch control only');
+      }
+    } catch(e) { console.warn('Permission error:', e); }
+  }
+  // Wake lock to prevent screen sleep in headset
+  try {
+    if ('wakeLock' in navigator) await navigator.wakeLock.request('screen');
+  } catch(e) {}
+  document.getElementById('startScreen').style.display = 'none';
+  document.getElementById('hud').style.display = 'flex';
+  score = 0; wave = 1; lives = 3; enemies = [];
+  gameActive = true;
+  document.getElementById('scoreDisplay').textContent = 'SCORE: 0';
+  document.getElementById('waveDisplay').textContent = 'WAVE 1';
+  document.getElementById('livesDisplay').textContent = '❤️❤️❤️';
+  startWave();
+}
+function endGame() {
+  gameActive = false;
+  clearInterval(spawnInterval);
+  enemies.forEach(e => { if (!e.isDisposed()) e.dispose(); });
+  enemies = [];
+  document.getElementById('hud').style.display = 'none';
+  document.getElementById('finalScore').textContent = `Final Score: ${score} — Wave ${wave}`;
+  document.getElementById('gameOver').style.display = 'flex';
+}
+document.getElementById('startBtn').addEventListener('click', startGame);
+document.getElementById('restartBtn').addEventListener('click', () => {
+  document.getElementById('gameOver').style.display = 'none';
+  startGame();
+});
+</script>
+</body>
+</html>
