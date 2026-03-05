@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-fullscreen" />
+  <meta name="screen-orientation" content="landscape" />
   <title>Gaze Shooter VR</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babylonjs/6.26.0/babylon.js"></script>
   <style>
@@ -22,9 +23,14 @@
     #startScreen h1 {
       font-size: clamp(2rem, 8vw, 4rem);
       color: #00ffcc; text-shadow: 0 0 30px #00ffcc;
-      margin-bottom: 1rem; letter-spacing: 4px;
+      margin-bottom: 0.5rem; letter-spacing: 4px;
     }
-    #startScreen p { color: #aaa; margin-bottom: 2rem; font-size: 1rem; }
+    #startScreen .subtitle {
+      color: #aaa; margin-bottom: 0.5rem; font-size: 0.9rem;
+    }
+    #startScreen .highscore {
+      color: #ffcc00; margin-bottom: 1.5rem; font-size: 1rem;
+    }
     #startBtn {
       background: transparent; border: 2px solid #00ffcc;
       color: #00ffcc; padding: 1rem 3rem;
@@ -33,314 +39,1556 @@
       transition: all 0.3s;
     }
     #startBtn:hover { background: #00ffcc22; box-shadow: 0 0 20px #00ffcc; }
-    #hud {
-      position: fixed; top: 0; left: 0; right: 0;
-      display: none; justify-content: space-between;
-      padding: 1rem 2rem; color: #00ffcc;
-      font-family: 'Courier New', monospace;
-      font-size: 1.2rem; pointer-events: none; z-index: 5;
-    }
     #gameOver {
       position: fixed; inset: 0;
-      background: #00000099;
+      background: rgba(0,0,0,0.85);
       display: none; flex-direction: column;
       align-items: center; justify-content: center;
       color: white; font-family: 'Courier New', monospace;
       text-align: center; z-index: 10;
     }
-    #gameOver h2 { font-size: 3rem; color: #ff4444; margin-bottom: 1rem; }
+    #gameOver h2 { font-size: 2.5rem; color: #ff4444; margin-bottom: 0.5rem; text-shadow: 0 0 20px #ff4444; }
+    #gameOver .newRecord { color: #ffcc00; font-size: 1.2rem; margin-bottom: 0.5rem; display: none; }
+    #gameOver .stats { color: #aaa; font-size: 0.9rem; line-height: 1.8; margin-bottom: 1rem; }
     #restartBtn {
-      background: transparent; border: 2px solid #fff;
-      color: #fff; padding: 0.8rem 2rem;
+      background: transparent; border: 2px solid #00ffcc;
+      color: #00ffcc; padding: 0.8rem 2rem;
       font-size: 1rem; font-family: inherit;
-      cursor: pointer; margin-top: 1rem;
+      cursor: pointer; margin-top: 0.5rem; letter-spacing: 2px;
+    }
+    #fpsCounter {
+      position: fixed; bottom: 4px; right: 8px;
+      color: #0f0; font-family: monospace; font-size: 10px;
+      z-index: 20; pointer-events: none; opacity: 0.6;
     }
   </style>
 </head>
 <body>
 <canvas id="renderCanvas"></canvas>
+
 <div id="startScreen">
   <h1>⚡ GAZE SHOOTER</h1>
-  <p>Put your phone in Cardboard.<br/>Look at enemies to destroy them.</p>
+  <p class="subtitle">Put your phone in Cardboard.<br/>Look at enemies to destroy them.</p>
+  <p class="highscore" id="startHighScore"></p>
   <button id="startBtn">TAP TO LAUNCH</button>
 </div>
-<div id="hud">
-  <span id="scoreDisplay">SCORE: 0</span>
-  <span id="waveDisplay">WAVE 1</span>
-  <span id="livesDisplay">❤️❤️❤️</span>
-</div>
+
 <div id="gameOver">
   <h2>GAME OVER</h2>
-  <p id="finalScore"></p>
+  <p class="newRecord" id="newRecord">★ NEW HIGH SCORE ★</p>
+  <div class="stats" id="gameStats"></div>
   <button id="restartBtn">PLAY AGAIN</button>
 </div>
+
+<div id="fpsCounter"></div>
+
 <script>
-// ─── STATE ───────────────────────────────────────────────────
-let score = 0, wave = 1, lives = 3;
-let enemies = [], gazeTarget = null, gazeDuration = 0;
-let gameActive = false;
-const DWELL_TIME = 1.5;
-const ENEMY_SPEED = 0.03;
-const SPAWN_RADIUS = 25;
-// ─── ENGINE & SCENE ──────────────────────────────────────────
+(function() {
+"use strict";
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// CONFIG
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const CONFIG = {
+  SPAWN_RADIUS: 28,
+  MAX_ENEMIES_PER_TYPE: 12,
+  GLOW_TEXTURE_SIZE: 256,
+  PROXIMITY_WARN_DIST: 8,
+  COMBO_WINDOW: 3.0,
+  POWERUP_COLLECT_DWELL: 0.5,
+  MAX_CONCURRENT_EXPLOSIONS: 3,
+  BOSS_ORBIT_RADIUS: 18,
+  BOSS_WAVE_INTERVAL: 5,
+  MAX_POWERUPS: 5,
+};
+
+const ENEMY_TYPES = {
+  BASIC:    { color: [1, 0.2, 0.2],   speed: 1.0, hp: 1, scale: 0.6,  score: 10, spawnWeight: 40, dwellTime: 1.2, unlockWave: 1 },
+  FAST:     { color: [1, 1, 0.2],     speed: 2.2, hp: 1, scale: 0.35, score: 15, spawnWeight: 25, dwellTime: 1.5, unlockWave: 2 },
+  TANK:     { color: [0.5, 0.1, 0.8], speed: 0.5, hp: 3, scale: 1.0,  score: 30, spawnWeight: 15, dwellTime: 0.8, unlockWave: 3 },
+  SPLITTER: { color: [0.2, 1, 0.2],   speed: 0.8, hp: 1, scale: 0.7,  score: 20, spawnWeight: 10, dwellTime: 1.0, unlockWave: 4 },
+  ZIGZAG:   { color: [1, 0.5, 0],     speed: 1.3, hp: 1, scale: 0.5,  score: 15, spawnWeight: 10, dwellTime: 1.3, unlockWave: 5 },
+};
+
+const POWERUP_TYPES = {
+  SHIELD:       { color: [0, 0.5, 1],   duration: 10, dropRate: 0.08 },
+  RAPID_FIRE:   { color: [1, 1, 0],     duration: 8,  dropRate: 0.10 },
+  MULTI_TARGET: { color: [1, 0, 1],     duration: 8,  dropRate: 0.06 },
+  TIME_SLOW:    { color: [0.5, 1, 0.5], duration: 6,  dropRate: 0.05 },
+};
+
+const EXPLOSION_CONFIGS = {
+  BASIC:    { count: 40,  minSize: 0.03, maxSize: 0.2,  lifetime: 0.6, power: 5,  radius: 0.2, c1: [1,0.5,0,1],   c2: [1,0,0,0.5] },
+  FAST:     { count: 30,  minSize: 0.02, maxSize: 0.15, lifetime: 0.4, power: 8,  radius: 0.15,c1: [1,1,0.3,1],   c2: [1,0.8,0,0.5] },
+  TANK:     { count: 80,  minSize: 0.05, maxSize: 0.4,  lifetime: 1.0, power: 4,  radius: 0.5, c1: [0.7,0.2,1,1], c2: [0.3,0,0.5,0.5] },
+  SPLITTER: { count: 50,  minSize: 0.03, maxSize: 0.25, lifetime: 0.5, power: 6,  radius: 0.3, c1: [0.3,1,0.3,1], c2: [0,0.5,0,0.5] },
+  ZIGZAG:   { count: 40,  minSize: 0.03, maxSize: 0.2,  lifetime: 0.6, power: 6,  radius: 0.2, c1: [1,0.6,0,1],   c2: [1,0.3,0,0.5] },
+  BOSS:     { count: 120, minSize: 0.1,  maxSize: 0.6,  lifetime: 1.5, power: 3,  radius: 1.0, c1: [1,1,1,1],     c2: [1,0.5,0,0.8] },
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STATE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const STATE = {
+  score: 0, wave: 1, lives: 3, gameActive: false,
+  totalKills: 0, bestCombo: 0, gazeAttempts: 0,
+  gazeTarget: null, gazeTargetType: null, gazeTargetIdx: -1,
+  gazeDuration: 0, gazeChargeOsc: null,
+  lastKillPos: null,
+  combo: { count: 0, timer: 0 },
+  activePowerUps: {},
+  shielded: false,
+  boss: null, bossActive: false,
+  spawnTimer: 0, spawnedThisWave: 0, waveConfig: null,
+  activeExplosions: 0,
+  shake: { intensity: 0, decay: 0.88 },
+  timeScale: 1.0,
+};
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENGINE & SCENE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 const canvas = document.getElementById('renderCanvas');
-const engine = new BABYLON.Engine(canvas, true, { preserveDrawingBuffer: true });
+const engine = new BABYLON.Engine(canvas, true, {
+  preserveDrawingBuffer: false,
+  powerPreference: "high-performance",
+  stencil: false,
+});
 const scene = new BABYLON.Scene(engine);
-scene.clearColor = new BABYLON.Color4(0, 0, 0.05, 1);
-// ─── CAMERA: VRDeviceOrientationFreeCamera = gyro + stereo ───
+scene.clearColor = new BABYLON.Color4(0.0, 0.0, 0.03, 1);
+scene.skipPointerMovePicking = true;
+scene.blockMaterialDirtyMechanism = true;
+
+// Camera
 const camera = new BABYLON.VRDeviceOrientationFreeCamera(
-  "vrCam",
-  new BABYLON.Vector3(0, 0, 0),
-  scene,
-  true // compensate distortion
+  "vrCam", new BABYLON.Vector3(0, 0, 0), scene, true
 );
 camera.setTarget(new BABYLON.Vector3(0, 0, -1));
 camera.attachControl(canvas, true);
-// ─── LIGHTING ────────────────────────────────────────────────
-const ambient = new BABYLON.HemisphericLight("amb", new BABYLON.Vector3(0,1,0), scene);
-ambient.intensity = 0.4;
-ambient.diffuse = new BABYLON.Color3(0.2, 0.5, 1);
-// ─── STARFIELD ───────────────────────────────────────────────
-const starSPS = new BABYLON.SolidParticleSystem("stars", scene);
-const starBox = BABYLON.MeshBuilder.CreateBox("sb", {size: 0.05}, scene);
-starSPS.addShape(starBox, 300);
-starBox.dispose();
+
+// Lighting
+const ambient = new BABYLON.HemisphericLight("amb", new BABYLON.Vector3(0, 1, 0), scene);
+ambient.intensity = 0.5;
+ambient.diffuse = new BABYLON.Color3(0.3, 0.5, 1);
+ambient.groundColor = new BABYLON.Color3(0.1, 0.05, 0.2);
+
+// Glow Layer
+const glowLayer = new BABYLON.GlowLayer("glow", scene, {
+  mainTextureFixedSize: CONFIG.GLOW_TEXTURE_SIZE,
+  blurKernelSize: 32,
+});
+glowLayer.intensity = 0.5;
+
+// Cockpit root for screen shake
+const cockpitRoot = new BABYLON.TransformNode("cockpitRoot", scene);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// AUDIO SYSTEM (Web Audio API)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const AUDIO = {
+  ctx: null, masterGain: null, sfxBus: null, musicBus: null,
+  droneNodes: [], bossNodes: [], noiseBuffer: null,
+  lastProximityBeep: 0,
+};
+
+function initAudio() {
+  if (AUDIO.ctx) return;
+  AUDIO.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  AUDIO.masterGain = AUDIO.ctx.createGain();
+  AUDIO.masterGain.gain.value = 0.5;
+  AUDIO.masterGain.connect(AUDIO.ctx.destination);
+  AUDIO.sfxBus = AUDIO.ctx.createGain();
+  AUDIO.sfxBus.gain.value = 0.7;
+  AUDIO.sfxBus.connect(AUDIO.masterGain);
+  AUDIO.musicBus = AUDIO.ctx.createGain();
+  AUDIO.musicBus.gain.value = 0.25;
+  AUDIO.musicBus.connect(AUDIO.masterGain);
+  // Pre-create noise buffer for explosions
+  const bufSize = AUDIO.ctx.sampleRate * 0.5;
+  AUDIO.noiseBuffer = AUDIO.ctx.createBuffer(1, bufSize, AUDIO.ctx.sampleRate);
+  const data = AUDIO.noiseBuffer.getChannelData(0);
+  for (let i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+}
+
+function startAmbientDrone() {
+  if (!AUDIO.ctx) return;
+  const ctx = AUDIO.ctx;
+  const osc1 = ctx.createOscillator(); osc1.type = 'sine'; osc1.frequency.value = 55;
+  const osc2 = ctx.createOscillator(); osc2.type = 'sine'; osc2.frequency.value = 82.5;
+  const gain = ctx.createGain(); gain.gain.value = 0.06;
+  const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 200;
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 0.1;
+  const lfoGain = ctx.createGain(); lfoGain.gain.value = 80;
+  lfo.connect(lfoGain); lfoGain.connect(filter.frequency);
+  osc1.connect(gain); osc2.connect(gain);
+  gain.connect(filter); filter.connect(AUDIO.musicBus);
+  osc1.start(); osc2.start(); lfo.start();
+  AUDIO.droneNodes = [osc1, osc2, lfo, gain, filter, lfoGain];
+}
+
+function stopAmbientDrone() {
+  AUDIO.droneNodes.forEach(n => { try { n.stop?.(); n.disconnect(); } catch(e){} });
+  AUDIO.droneNodes = [];
+}
+
+function startBossMusic() {
+  if (!AUDIO.ctx) return;
+  const ctx = AUDIO.ctx;
+  const osc1 = ctx.createOscillator(); osc1.type = 'sawtooth'; osc1.frequency.value = 65;
+  const osc2 = ctx.createOscillator(); osc2.type = 'sawtooth'; osc2.frequency.value = 65.5;
+  const lfo = ctx.createOscillator(); lfo.frequency.value = 2.5;
+  const lfoGain = ctx.createGain(); lfoGain.gain.value = 0.12;
+  const masterGain = ctx.createGain(); masterGain.gain.value = 0;
+  lfo.connect(lfoGain); lfoGain.connect(masterGain.gain);
+  osc1.connect(masterGain); osc2.connect(masterGain);
+  const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 350;
+  masterGain.connect(filter); filter.connect(AUDIO.musicBus);
+  osc1.start(); osc2.start(); lfo.start();
+  AUDIO.bossNodes = [osc1, osc2, lfo, lfoGain, masterGain, filter];
+}
+
+function stopBossMusic() {
+  AUDIO.bossNodes.forEach(n => { try { n.stop?.(); n.disconnect(); } catch(e){} });
+  AUDIO.bossNodes = [];
+}
+
+function playGazeCharge(duration) {
+  if (!AUDIO.ctx) return null;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(200, t);
+  osc.frequency.linearRampToValueAtTime(800, t + duration);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0, t);
+  gain.gain.linearRampToValueAtTime(0.1, t + duration * 0.2);
+  gain.gain.setValueAtTime(0.1, t + duration * 0.8);
+  gain.gain.linearRampToValueAtTime(0, t + duration);
+  const filter = ctx.createBiquadFilter(); filter.type = 'bandpass';
+  filter.frequency.value = 500; filter.Q.value = 4;
+  osc.connect(filter); filter.connect(gain); gain.connect(AUDIO.sfxBus);
+  osc.start(); osc.stop(t + duration + 0.05);
+  return { osc, gain };
+}
+
+function stopGazeCharge() {
+  if (STATE.gazeChargeOsc) {
+    try {
+      STATE.gazeChargeOsc.gain.gain.cancelScheduledValues(AUDIO.ctx.currentTime);
+      STATE.gazeChargeOsc.gain.gain.setValueAtTime(0.001, AUDIO.ctx.currentTime);
+      STATE.gazeChargeOsc.gain.gain.exponentialRampToValueAtTime(0.0001, AUDIO.ctx.currentTime + 0.05);
+      STATE.gazeChargeOsc.osc.stop(AUDIO.ctx.currentTime + 0.06);
+    } catch(e) {}
+    STATE.gazeChargeOsc = null;
+  }
+}
+
+function playLaserFire() {
+  if (!AUDIO.ctx) return;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = 'square';
+  osc.frequency.setValueAtTime(880, t);
+  osc.frequency.exponentialRampToValueAtTime(110, t + 0.15);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.25, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.15);
+  osc.connect(gain); gain.connect(AUDIO.sfxBus);
+  osc.start(); osc.stop(t + 0.16);
+}
+
+function playExplosion(intensity) {
+  if (!AUDIO.ctx || !AUDIO.noiseBuffer) return;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const noise = ctx.createBufferSource(); noise.buffer = AUDIO.noiseBuffer;
+  const filter = ctx.createBiquadFilter(); filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(800 * intensity, t);
+  filter.frequency.exponentialRampToValueAtTime(80, t + 0.4);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.35 * intensity, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+  noise.connect(filter); filter.connect(gain); gain.connect(AUDIO.sfxBus);
+  noise.start(); noise.stop(t + 0.45);
+}
+
+function playProximityBeep(distance) {
+  if (!AUDIO.ctx) return;
+  const rate = Math.max(0.5, 4.0 - distance * 0.4);
+  const now = performance.now();
+  if (now - AUDIO.lastProximityBeep < (1000 / rate)) return;
+  AUDIO.lastProximityBeep = now;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = 'sine'; osc.frequency.value = 440;
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.15, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
+  osc.connect(gain); gain.connect(AUDIO.sfxBus);
+  osc.start(); osc.stop(t + 0.07);
+}
+
+function playPowerUpCollect() {
+  if (!AUDIO.ctx) return;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = 'sine';
+  osc.frequency.setValueAtTime(523, t);
+  osc.frequency.setValueAtTime(659, t + 0.08);
+  osc.frequency.setValueAtTime(784, t + 0.16);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.2, t);
+  gain.gain.linearRampToValueAtTime(0.2, t + 0.2);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
+  osc.connect(gain); gain.connect(AUDIO.sfxBus);
+  osc.start(); osc.stop(t + 0.36);
+}
+
+function playDamage() {
+  if (!AUDIO.ctx) return;
+  const ctx = AUDIO.ctx; const t = ctx.currentTime;
+  const osc = ctx.createOscillator(); osc.type = 'sawtooth';
+  osc.frequency.setValueAtTime(150, t);
+  osc.frequency.exponentialRampToValueAtTime(40, t + 0.3);
+  const gain = ctx.createGain();
+  gain.gain.setValueAtTime(0.3, t);
+  gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+  osc.connect(gain); gain.connect(AUDIO.sfxBus);
+  osc.start(); osc.stop(t + 0.31);
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// STARFIELD (SPS - 800 tiny planes)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const starSPS = new BABYLON.SolidParticleSystem("stars", scene, { updatable: true });
+const starPlane = BABYLON.MeshBuilder.CreatePlane("sp", { size: 0.06 }, scene);
+starSPS.addShape(starPlane, 800);
+starPlane.dispose();
 const starMesh = starSPS.buildMesh();
 const starMat = new BABYLON.StandardMaterial("starMat", scene);
 starMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+starMat.disableLighting = true;
+starMat.backFaceCulling = false;
 starMesh.material = starMat;
+starMesh.isPickable = false;
+
 starSPS.initParticles = () => {
   for (let i = 0; i < starSPS.nbParticles; i++) {
     const p = starSPS.particles[i];
-    p.position.x = (Math.random() - 0.5) * 80;
-    p.position.y = (Math.random() - 0.5) * 80;
-    p.position.z = (Math.random() - 0.5) * 80;
-    p.color = new BABYLON.Color4(1, 1, 1, Math.random() * 0.8 + 0.2);
+    p.position.x = (Math.random() - 0.5) * 100;
+    p.position.y = (Math.random() - 0.5) * 100;
+    p.position.z = (Math.random() - 0.5) * 100;
+    // Color variation: white, pale blue, pale yellow
+    const colorType = Math.random();
+    if (colorType < 0.6) p.color = new BABYLON.Color4(1, 1, 1, Math.random() * 0.7 + 0.3);
+    else if (colorType < 0.8) p.color = new BABYLON.Color4(0.7, 0.8, 1, Math.random() * 0.7 + 0.3);
+    else p.color = new BABYLON.Color4(1, 1, 0.7, Math.random() * 0.7 + 0.3);
+    p.props = { phase: Math.random() * Math.PI * 2 };
   }
+};
+starSPS.updateParticle = (p) => {
+  p.color.a = 0.3 + 0.7 * Math.abs(Math.sin(performance.now() * 0.0008 + p.props.phase));
+  return p;
 };
 starSPS.initParticles();
 starSPS.setParticles();
-// ─── COCKPIT FRAME ───────────────────────────────────────────
-function buildCockpit() {
-  const mat = new BABYLON.StandardMaterial("cockpitMat", scene);
-  mat.emissiveColor = new BABYLON.Color3(0, 0.8, 0.6);
-  mat.wireframe = true;
-  // Bottom frame ring
-  const ring = BABYLON.MeshBuilder.CreateTorus("ring", {
-    diameter: 3, thickness: 0.05, tessellation: 8
-  }, scene);
-  ring.position.y = -1.2;
-  ring.material = mat;
-  // Side struts
-  for (let i = 0; i < 4; i++) {
-    const strut = BABYLON.MeshBuilder.CreateBox("strut" + i, {
-      width: 0.04, height: 2, depth: 0.04
-    }, scene);
-    const angle = (i / 4) * Math.PI * 2;
-    strut.position.x = Math.cos(angle) * 1.4;
-    strut.position.z = Math.sin(angle) * 1.4;
-    strut.position.y = -0.2;
-    strut.material = mat;
+starSPS.billboard = true;
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// NEBULA BACKDROP
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function createNebula(index, posX, posY, posZ, r, g, b) {
+  const size = 512;
+  const dt = new BABYLON.DynamicTexture("nebulaTex" + index, size, scene, false);
+  const ctx = dt.getContext();
+  ctx.fillStyle = "rgba(0,0,0,0)";
+  ctx.fillRect(0, 0, size, size);
+  for (let i = 0; i < 5; i++) {
+    const cx = Math.random() * size, cy = Math.random() * size;
+    const rad = size * (0.25 + Math.random() * 0.35);
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+    const alpha = 0.06 + Math.random() * 0.08;
+    grad.addColorStop(0, `rgba(${Math.floor(r*255)},${Math.floor(g*255)},${Math.floor(b*255)},${alpha})`);
+    grad.addColorStop(1, `rgba(0,0,0,0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
   }
-  // HUD panel (billboard-style indicator at bottom)
-  const panel = BABYLON.MeshBuilder.CreatePlane("panel", {width: 2, height: 0.3}, scene);
-  panel.position.set(0, -0.9, -1.8);
-  const panelMat = new BABYLON.StandardMaterial("panelMat", scene);
-  panelMat.emissiveColor = new BABYLON.Color3(0, 0.4, 0.3);
-  panelMat.backFaceCulling = false;
-  panel.material = panelMat;
+  dt.update();
+  const plane = BABYLON.MeshBuilder.CreatePlane("nebula" + index, { width: 50, height: 50 }, scene);
+  plane.position.set(posX, posY, posZ);
+  plane.lookAt(BABYLON.Vector3.Zero());
+  const mat = new BABYLON.StandardMaterial("nebulaMat" + index, scene);
+  mat.diffuseTexture = dt;
+  mat.emissiveTexture = dt;
+  mat.opacityTexture = dt;
+  mat.backFaceCulling = false;
+  mat.disableLighting = true;
+  mat.alpha = 0.8;
+  plane.material = mat;
+  plane.isPickable = false;
+  return plane;
+}
+
+createNebula(0, -30, 10, -60,  0.3, 0.1, 0.6);
+createNebula(1,  40, -5, -50,  0.1, 0.2, 0.5);
+createNebula(2,  0,  25, -55,  0.15, 0.4, 0.4);
+createNebula(3, -20, -15, -65, 0.4, 0.1, 0.3);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// COCKPIT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const cockpitMat = new BABYLON.StandardMaterial("cockpitMat", scene);
+cockpitMat.emissiveColor = new BABYLON.Color3(0, 0.7, 0.5);
+cockpitMat.wireframe = true;
+cockpitMat.disableLighting = true;
+const cockpitOriginalColor = cockpitMat.emissiveColor.clone();
+
+function buildCockpit() {
+  // Bottom ring
+  const ring = BABYLON.MeshBuilder.CreateTorus("ring", { diameter: 3, thickness: 0.05, tessellation: 16 }, scene);
+  ring.position.y = -1.2; ring.material = cockpitMat; ring.parent = cockpitRoot; ring.isPickable = false;
+  // 6 struts
+  for (let i = 0; i < 6; i++) {
+    const strut = BABYLON.MeshBuilder.CreateCylinder("strut" + i, { height: 2.2, diameter: 0.03, tessellation: 6 }, scene);
+    const angle = (i / 6) * Math.PI * 2;
+    strut.position.set(Math.cos(angle) * 1.4, -0.1, Math.sin(angle) * 1.4);
+    strut.material = cockpitMat; strut.parent = cockpitRoot; strut.isPickable = false;
+  }
+  // Top ring
+  const topRing = BABYLON.MeshBuilder.CreateTorus("topRing", { diameter: 2.2, thickness: 0.04, tessellation: 16 }, scene);
+  topRing.position.y = 0.9; topRing.material = cockpitMat; topRing.parent = cockpitRoot; topRing.isPickable = false;
+  // Angled canopy panels (2 side panels)
+  for (let side = -1; side <= 1; side += 2) {
+    const panel = BABYLON.MeshBuilder.CreatePlane("canopy" + side, { width: 0.8, height: 1.8 }, scene);
+    panel.position.set(side * 1.3, 0, -0.3);
+    panel.rotation.y = side * 0.4;
+    const panelMat = new BABYLON.StandardMaterial("canopyMat" + side, scene);
+    panelMat.emissiveColor = new BABYLON.Color3(0, 0.3, 0.2);
+    panelMat.alpha = 0.15;
+    panelMat.backFaceCulling = false;
+    panelMat.disableLighting = true;
+    panel.material = panelMat; panel.parent = cockpitRoot; panel.isPickable = false;
+  }
+  // Thruster glow points
+  for (let i = 0; i < 2; i++) {
+    const thruster = BABYLON.MeshBuilder.CreateSphere("thruster" + i, { diameter: 0.12 }, scene);
+    thruster.position.set(i === 0 ? -0.6 : 0.6, -1.1, 1.2);
+    const tMat = new BABYLON.StandardMaterial("thrusterMat" + i, scene);
+    tMat.emissiveColor = new BABYLON.Color3(0, 0.8, 1);
+    tMat.disableLighting = true;
+    thruster.material = tMat;
+    thruster.parent = cockpitRoot;
+    thruster.isPickable = false;
+    glowLayer.addIncludedOnlyMesh(thruster);
+  }
 }
 buildCockpit();
-// ─── RETICLE ─────────────────────────────────────────────────
-const reticleOuter = BABYLON.MeshBuilder.CreateTorus("reticleO", {
-  diameter: 0.15, thickness: 0.008, tessellation: 32
-}, scene);
-const reticleInner = BABYLON.MeshBuilder.CreateDisc("reticleI", {
-  radius: 0.015, tessellation: 16
-}, scene);
-[reticleOuter, reticleInner].forEach(m => {
-  const mat = new BABYLON.StandardMaterial("rMat" + m.name, scene);
-  mat.emissiveColor = new BABYLON.Color3(1, 1, 1);
-  mat.backFaceCulling = false;
-  m.material = mat;
-  m.isPickable = false;
-});
-// fill arc for dwell timer
-const reticleFill = BABYLON.MeshBuilder.CreateTorus("reticleF", {
-  diameter: 0.15, thickness: 0.012, tessellation: 32
-}, scene);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// 3D HUD DASHBOARD
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const hudTexture = new BABYLON.DynamicTexture("hudTex", { width: 512, height: 128 }, scene, false);
+const hudPlane = BABYLON.MeshBuilder.CreatePlane("hudPlane", { width: 2.2, height: 0.55 }, scene);
+hudPlane.position.set(0, -0.85, -1.7);
+hudPlane.rotation.y = Math.PI; // face the camera
+const hudMat = new BABYLON.StandardMaterial("hudMat", scene);
+hudMat.diffuseTexture = hudTexture;
+hudMat.emissiveTexture = hudTexture;
+hudMat.opacityTexture = hudTexture;
+hudMat.backFaceCulling = false;
+hudMat.disableLighting = true;
+hudPlane.material = hudMat;
+hudPlane.parent = cockpitRoot;
+hudPlane.isPickable = false;
+
+function updateHUD() {
+  const ctx = hudTexture.getContext();
+  ctx.clearRect(0, 0, 512, 128);
+  // Score
+  ctx.font = "bold 28px 'Courier New'";
+  ctx.fillStyle = "#00ffcc";
+  ctx.fillText(`SCORE: ${STATE.score}`, 15, 30);
+  // Wave
+  ctx.fillText(`WAVE ${STATE.wave}`, 15, 62);
+  // Combo
+  if (STATE.combo.count >= 3) {
+    ctx.fillStyle = "#ffcc00";
+    ctx.font = "bold 22px 'Courier New'";
+    const mult = getComboMultiplier();
+    ctx.fillText(`${STATE.combo.count}x COMBO (${mult.toFixed(1)}x)`, 260, 30);
+  }
+  // Health bar
+  const barX = 300, barY = 48, barW = 180, barH = 16;
+  ctx.strokeStyle = "#00ffcc44";
+  ctx.strokeRect(barX, barY, barW, barH);
+  const hpRatio = STATE.lives / 3;
+  ctx.fillStyle = hpRatio > 0.5 ? "#00ff88" : hpRatio > 0.25 ? "#ffcc00" : "#ff4444";
+  ctx.fillRect(barX + 1, barY + 1, (barW - 2) * hpRatio, barH - 2);
+  ctx.fillStyle = "#ffffff88";
+  ctx.font = "12px 'Courier New'";
+  ctx.fillText("HULL", barX, barY - 3);
+  // Active power-ups
+  let puY = 78;
+  for (const [type, pu] of Object.entries(STATE.activePowerUps)) {
+    if (pu.remaining <= 0) continue;
+    const cfg = POWERUP_TYPES[type];
+    const ratio = pu.remaining / cfg.duration;
+    ctx.fillStyle = `rgb(${Math.floor(cfg.color[0]*255)},${Math.floor(cfg.color[1]*255)},${Math.floor(cfg.color[2]*255)})`;
+    ctx.fillRect(300, puY, 180 * ratio, 10);
+    ctx.strokeStyle = "#ffffff33";
+    ctx.strokeRect(300, puY, 180, 10);
+    ctx.fillStyle = "#ffffffaa";
+    ctx.font = "10px 'Courier New'";
+    ctx.fillText(type.replace('_', ' '), 300, puY - 2);
+    puY += 18;
+  }
+  hudTexture.update();
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SHIELD VISUAL
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const shieldSphere = BABYLON.MeshBuilder.CreateSphere("shield", { diameter: 2.8, segments: 12 }, scene);
+const shieldMat = new BABYLON.StandardMaterial("shieldMat", scene);
+shieldMat.emissiveColor = new BABYLON.Color3(0, 0.4, 0.8);
+shieldMat.alpha = 0;
+shieldMat.wireframe = true;
+shieldMat.disableLighting = true;
+shieldSphere.material = shieldMat;
+shieldSphere.parent = cockpitRoot;
+shieldSphere.isPickable = false;
+glowLayer.addIncludedOnlyMesh(shieldSphere);
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RETICLE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const reticleMat = new BABYLON.StandardMaterial("reticleMat", scene);
+reticleMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+reticleMat.backFaceCulling = false;
+reticleMat.disableLighting = true;
+
+const reticleOuter = BABYLON.MeshBuilder.CreateTorus("reticleO", { diameter: 0.15, thickness: 0.008, tessellation: 32 }, scene);
+reticleOuter.material = reticleMat; reticleOuter.isPickable = false;
+const reticleInner = BABYLON.MeshBuilder.CreateDisc("reticleI", { radius: 0.012, tessellation: 16 }, scene);
+const reticleInnerMat = new BABYLON.StandardMaterial("reticleInnerMat", scene);
+reticleInnerMat.emissiveColor = new BABYLON.Color3(1, 1, 1);
+reticleInnerMat.backFaceCulling = false;
+reticleInnerMat.disableLighting = true;
+reticleInner.material = reticleInnerMat; reticleInner.isPickable = false;
+
 const fillMat = new BABYLON.StandardMaterial("fillMat", scene);
 fillMat.emissiveColor = new BABYLON.Color3(0, 1, 0.6);
-reticleFill.material = fillMat;
-reticleFill.isPickable = false;
-reticleFill.scaling.x = 0;
-function updateReticle(dt) {
-  // Position 2m in front of camera
+fillMat.disableLighting = true;
+const reticleFill = BABYLON.MeshBuilder.CreateTorus("reticleF", { diameter: 0.15, thickness: 0.012, tessellation: 32 }, scene);
+reticleFill.material = fillMat; reticleFill.isPickable = false;
+reticleFill.scaling.x = 0; reticleFill.scaling.y = 0;
+
+[reticleOuter, reticleInner, reticleFill].forEach(m => glowLayer.addIncludedOnlyMesh(m));
+
+function updateReticle(chargeRatio, enemyType) {
   const forward = camera.getForwardRay().direction;
   const pos = camera.position.add(forward.scale(2));
   [reticleOuter, reticleInner, reticleFill].forEach(m => {
     m.position = pos;
     m.lookAt(camera.position);
   });
-  // Fill
-  const fill = Math.min(dt / DWELL_TIME, 1);
+  const fill = Math.min(chargeRatio, 1);
   reticleFill.scaling.x = fill;
   reticleFill.scaling.y = fill;
-  fillMat.emissiveColor = fill > 0.8
-    ? new BABYLON.Color3(1, 0.3, 0)
-    : new BABYLON.Color3(0, 1, 0.6);
+  if (enemyType && ENEMY_TYPES[enemyType]) {
+    const c = ENEMY_TYPES[enemyType].color;
+    const pulse = 0.7 + 0.3 * Math.sin(performance.now() * 0.01);
+    reticleMat.emissiveColor.set(c[0] * pulse, c[1] * pulse, c[2] * pulse);
+    fillMat.emissiveColor = fill > 0.85
+      ? new BABYLON.Color3(1, 1, 1)
+      : new BABYLON.Color3(c[0], c[1], c[2]);
+  } else {
+    reticleMat.emissiveColor.set(0.4, 0.4, 0.4);
+    fillMat.emissiveColor.set(0, 1, 0.6);
+  }
 }
-// ─── ENEMY FACTORY ───────────────────────────────────────────
-const enemyMat = new BABYLON.StandardMaterial("enemyMat", scene);
-enemyMat.emissiveColor = new BABYLON.Color3(1, 0.2, 0.2);
-const enemyMatAlt = new BABYLON.StandardMaterial("enemyMatAlt", scene);
-enemyMatAlt.emissiveColor = new BABYLON.Color3(1, 0.6, 0);
-function spawnEnemy() {
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// ENEMY SPS SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const enemySPSMap = {};
+const enemyData = {}; // per-particle metadata
+
+function createEnemySPS(type) {
+  const cfg = ENEMY_TYPES[type];
+  const sps = new BABYLON.SolidParticleSystem("sps_" + type, scene, { isPickable: true, updatable: true });
+  let template;
+  if (type === 'FAST') {
+    template = BABYLON.MeshBuilder.CreateIcoSphere("t", { radius: 0.5, subdivisions: 1 }, scene);
+    template.scaling.z = 1.8;
+  } else if (type === 'TANK') {
+    template = BABYLON.MeshBuilder.CreateIcoSphere("t", { radius: 0.5, subdivisions: 3 }, scene);
+  } else {
+    template = BABYLON.MeshBuilder.CreateIcoSphere("t", { radius: 0.5, subdivisions: 2 }, scene);
+  }
+  sps.addShape(template, CONFIG.MAX_ENEMIES_PER_TYPE);
+  template.dispose();
+  const mesh = sps.buildMesh();
+  const mat = new BABYLON.StandardMaterial("enemyMat_" + type, scene);
+  mat.emissiveColor = new BABYLON.Color3(cfg.color[0], cfg.color[1], cfg.color[2]);
+  mat.disableLighting = true;
+  mesh.material = mat;
+  mesh.alwaysSelectAsActiveMesh = true; // skip frustum culling — SPS bounding box is stale
+
+  sps.initParticles = () => {
+    for (let i = 0; i < sps.nbParticles; i++) {
+      const p = sps.particles[i];
+      p.isVisible = false;
+      p.position.set(0, -999, 0);
+      p.scaling.set(0, 0, 0);
+    }
+  };
+  sps.initParticles();
+  sps.setParticles();
+
+  enemySPSMap[type] = { sps, mesh, mat, activeCount: 0 };
+  enemyData[type] = [];
+  for (let i = 0; i < CONFIG.MAX_ENEMIES_PER_TYPE; i++) {
+    enemyData[type].push({ active: false, hp: 0, maxHp: 0, speedMult: 1, phase: 0 });
+  }
+}
+
+Object.keys(ENEMY_TYPES).forEach(type => createEnemySPS(type));
+
+function spawnEnemy(type, pos) {
+  const spsInfo = enemySPSMap[type];
+  const data = enemyData[type];
+  const cfg = ENEMY_TYPES[type];
+  // Find free slot
+  let idx = -1;
+  for (let i = 0; i < data.length; i++) {
+    if (!data[i].active) { idx = i; break; }
+  }
+  if (idx === -1) return -1;
+
+  const spawnPos = pos || randomSpawnPosition();
+  const p = spsInfo.sps.particles[idx];
+  p.isVisible = true;
+  p.position.copyFrom(spawnPos);
+  p.scaling.set(cfg.scale, cfg.scale, type === 'FAST' ? cfg.scale * 1.8 : cfg.scale);
+  p.color = new BABYLON.Color4(cfg.color[0], cfg.color[1], cfg.color[2], 1);
+
+  data[idx].active = true;
+  data[idx].hp = cfg.hp;
+  data[idx].maxHp = cfg.hp;
+  data[idx].speedMult = 0.85 + Math.random() * 0.3;
+  data[idx].phase = Math.random() * Math.PI * 2;
+  spsInfo.activeCount++;
+  return idx;
+}
+
+function randomSpawnPosition() {
   const theta = Math.random() * Math.PI * 2;
-  const phi = (Math.random() * 0.6 + 0.2) * Math.PI; // mostly in front hemisphere
-  const r = SPAWN_RADIUS;
-  const pos = new BABYLON.Vector3(
+  const phi = (Math.random() * 0.6 + 0.2) * Math.PI;
+  const r = CONFIG.SPAWN_RADIUS;
+  return new BABYLON.Vector3(
     r * Math.sin(phi) * Math.cos(theta),
-    r * Math.sin(phi) * Math.sin(theta) * 0.5, // flatten vertically a bit
+    r * Math.sin(phi) * Math.sin(theta) * 0.5,
     r * Math.cos(phi)
   );
-  const size = 0.6 + Math.random() * 0.6;
-  const enemy = BABYLON.MeshBuilder.CreateIcoSphere("enemy_" + Date.now(), {
-    radius: size, subdivisions: 2
-  }, scene);
-  enemy.position = pos;
-  enemy.material = Math.random() > 0.3 ? enemyMat : enemyMatAlt;
-  enemy.metadata = { hp: 1, size };
-  enemies.push(enemy);
 }
-// ─── EXPLOSION EFFECT ────────────────────────────────────────
-function explode(pos) {
-  const ps = new BABYLON.ParticleSystem("exp", 60, scene);
+
+function killEnemyAt(type, idx) {
+  const spsInfo = enemySPSMap[type];
+  const data = enemyData[type];
+  const p = spsInfo.sps.particles[idx];
+  const pos = p.position.clone();
+
+  // Explosion
+  explodeEnemy(pos, type);
+  playLaserFire();
+  playExplosion(type === 'TANK' ? 1.5 : 1.0);
+
+  // Laser bolt visual
+  fireLaserBolt(pos);
+
+  // Handle splitter
+  if (type === 'SPLITTER') {
+    for (let i = 0; i < 2; i++) {
+      const offset = new BABYLON.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 2);
+      spawnEnemy('BASIC', pos.add(offset));
+    }
+  }
+
+  // Deactivate
+  p.isVisible = false;
+  p.position.set(0, -999, 0);
+  p.scaling.set(0, 0, 0);
+  data[idx].active = false;
+  spsInfo.activeCount--;
+
+  // Scoring
+  const cfg = ENEMY_TYPES[type];
+  STATE.combo.count++;
+  STATE.combo.timer = CONFIG.COMBO_WINDOW;
+  if (STATE.combo.count > STATE.bestCombo) STATE.bestCombo = STATE.combo.count;
+  const comboMult = getComboMultiplier();
+  STATE.score += Math.floor(cfg.score * STATE.wave * comboMult);
+  STATE.totalKills++;
+  STATE.lastKillPos = pos;
+
+  // Shake
+  triggerShake(0.04);
+
+  // Maybe drop power-up
+  maybeDropPowerUp(pos);
+
+  // Update HUD
+  updateHUD();
+}
+
+function damageEnemyAt(type, idx) {
+  const data = enemyData[type];
+  data[idx].hp--;
+  if (data[idx].hp <= 0) {
+    killEnemyAt(type, idx);
+    return true;
+  }
+  // Update color to show damage
+  const p = enemySPSMap[type].sps.particles[idx];
+  const cfg = ENEMY_TYPES[type];
+  const hpRatio = data[idx].hp / data[idx].maxHp;
+  p.color = new BABYLON.Color4(
+    cfg.color[0] + (1 - cfg.color[0]) * (1 - hpRatio),
+    cfg.color[1] * hpRatio,
+    cfg.color[2] * hpRatio,
+    1
+  );
+  triggerShake(0.02);
+  playLaserFire();
+  return false;
+}
+
+function getTotalActiveEnemies() {
+  let total = 0;
+  for (const type of Object.keys(ENEMY_TYPES)) {
+    total += enemySPSMap[type].activeCount;
+  }
+  return total;
+}
+
+function selectEnemyType(wave) {
+  const available = Object.entries(ENEMY_TYPES).filter(([, cfg]) => wave >= cfg.unlockWave);
+  const totalWeight = available.reduce((sum, [, cfg]) => sum + cfg.spawnWeight, 0);
+  let r = Math.random() * totalWeight;
+  for (const [type, cfg] of available) {
+    r -= cfg.spawnWeight;
+    if (r <= 0) return type;
+  }
+  return 'BASIC';
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// EXPLOSIONS
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function explodeEnemy(pos, type) {
+  if (STATE.activeExplosions >= CONFIG.MAX_CONCURRENT_EXPLOSIONS) return;
+  STATE.activeExplosions++;
+  const cfg = EXPLOSION_CONFIGS[type] || EXPLOSION_CONFIGS.BASIC;
+  const ps = new BABYLON.ParticleSystem("exp", cfg.count, scene);
   ps.emitter = pos.clone();
-  ps.minSize = 0.05; ps.maxSize = 0.3;
-  ps.minLifeTime = 0.3; ps.maxLifeTime = 0.8;
-  ps.emitRate = 200;
-  ps.minEmitPower = 3; ps.maxEmitPower = 8;
-  ps.createSphereEmitter(0.2);
-  ps.color1 = new BABYLON.Color4(1, 0.5, 0, 1);
-  ps.color2 = new BABYLON.Color4(1, 0, 0, 0.5);
+  ps.minSize = cfg.minSize; ps.maxSize = cfg.maxSize;
+  ps.minLifeTime = 0.15; ps.maxLifeTime = cfg.lifetime;
+  ps.emitRate = 500;
+  ps.minEmitPower = cfg.power * 0.5; ps.maxEmitPower = cfg.power;
+  ps.createSphereEmitter(cfg.radius);
+  ps.color1 = new BABYLON.Color4(cfg.c1[0], cfg.c1[1], cfg.c1[2], cfg.c1[3]);
+  ps.color2 = new BABYLON.Color4(cfg.c2[0], cfg.c2[1], cfg.c2[2], cfg.c2[3]);
   ps.colorDead = new BABYLON.Color4(0, 0, 0, 0);
   ps.blendMode = BABYLON.ParticleSystem.BLENDMODE_ADD;
   ps.start();
-  setTimeout(() => ps.stop(), 200);
-  setTimeout(() => ps.dispose(), 1500);
+  setTimeout(() => ps.stop(), 120);
+  setTimeout(() => { ps.dispose(); STATE.activeExplosions--; }, cfg.lifetime * 1000 + 300);
 }
-// ─── KILL ENEMY ──────────────────────────────────────────────
-function killEnemy(mesh) {
-  explode(mesh.position.clone());
-  mesh.dispose();
-  enemies = enemies.filter(e => e !== mesh);
-  score += 10 * wave;
-  document.getElementById('scoreDisplay').textContent = `SCORE: ${score}`;
-  gazeTarget = null;
-  gazeDuration = 0;
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// LASER BOLT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const laserMat = new BABYLON.StandardMaterial("laserMat", scene);
+laserMat.emissiveColor = new BABYLON.Color3(0, 1, 0.8);
+laserMat.disableLighting = true;
+
+function fireLaserBolt(targetPos) {
+  const bolt = BABYLON.MeshBuilder.CreateCylinder("bolt", { height: 2.5, diameter: 0.06, tessellation: 6 }, scene);
+  bolt.material = laserMat;
+  bolt.isPickable = false;
+  glowLayer.addIncludedOnlyMesh(bolt);
+  const dir = targetPos.subtract(camera.position);
+  const startPos = camera.position.add(dir.normalize().scale(1.5));
+  bolt.position = startPos.clone();
+  bolt.lookAt(targetPos);
+  bolt.rotation.x += Math.PI / 2;
+  const anim = new BABYLON.Animation("boltMove", "position", 60, BABYLON.Animation.ANIMATIONTYPE_VECTOR3);
+  anim.setKeys([
+    { frame: 0, value: startPos.clone() },
+    { frame: 6, value: targetPos.clone() }
+  ]);
+  bolt.animations = [anim];
+  scene.beginAnimation(bolt, 0, 6, false, 1, () => {
+    glowLayer.removeIncludedOnlyMesh(bolt);
+    bolt.dispose();
+  });
 }
-// ─── LOSE LIFE ───────────────────────────────────────────────
-function loseLife(mesh) {
-  mesh.dispose();
-  enemies = enemies.filter(e => e !== mesh);
-  lives--;
-  const hearts = '❤️'.repeat(Math.max(0, lives)) + '🖤'.repeat(Math.max(0, 3 - lives));
-  document.getElementById('livesDisplay').textContent = hearts;
-  if (lives <= 0) endGame();
-}
-// ─── WAVE MANAGEMENT ─────────────────────────────────────────
-let spawnInterval;
-function startWave() {
-  document.getElementById('waveDisplay').textContent = `WAVE ${wave}`;
-  clearInterval(spawnInterval);
-  const spawnRate = Math.max(800, 2000 - wave * 200);
-  const count = 3 + wave;
-  let spawned = 0;
-  spawnInterval = setInterval(() => {
-    if (spawned < count && gameActive) { spawnEnemy(); spawned++; }
-    else clearInterval(spawnInterval);
-  }, spawnRate);
-}
-// ─── MAIN GAME LOOP ──────────────────────────────────────────
-scene.registerBeforeRender(() => {
-  if (!gameActive) return;
-  const dt = engine.getDeltaTime() / 1000;
-  // Move enemies toward origin
-  for (let i = enemies.length - 1; i >= 0; i--) {
-    const e = enemies[i];
-    if (!e || e.isDisposed()) { enemies.splice(i, 1); continue; }
-    const dir = BABYLON.Vector3.Zero().subtract(e.position).normalize();
-    e.position.addInPlace(dir.scale(ENEMY_SPEED * (1 + wave * 0.1)));
-    e.rotate(BABYLON.Axis.Y, 0.02);
-    // Hit player
-    if (e.position.length() < 1.5) { loseLife(e); continue; }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// POWER-UP SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const powerUps = []; // array of { mesh, type, pos, age }
+
+function maybeDropPowerUp(pos) {
+  if (powerUps.length >= CONFIG.MAX_POWERUPS) return;
+  const dropBoost = Math.min(STATE.wave * 0.01, 0.15);
+  const types = Object.entries(POWERUP_TYPES);
+  for (const [type, cfg] of types) {
+    if (Math.random() < cfg.dropRate + dropBoost) {
+      spawnPowerUp(type, pos);
+      return;
+    }
   }
-  // Check next wave
-  if (enemies.length === 0 && gameActive) {
-    wave++;
-    document.getElementById('waveDisplay').textContent = `WAVE ${wave}`;
+}
+
+function spawnPowerUp(type, pos) {
+  const cfg = POWERUP_TYPES[type];
+  const mesh = BABYLON.MeshBuilder.CreateBox("pu_" + type + Date.now(), { size: 0.45 }, scene);
+  mesh.position = pos.clone();
+  const mat = new BABYLON.StandardMaterial("puMat_" + Date.now(), scene);
+  mat.emissiveColor = new BABYLON.Color3(cfg.color[0], cfg.color[1], cfg.color[2]);
+  mat.disableLighting = true;
+  mesh.material = mat;
+  mesh.isPickable = false; // we do manual distance check
+  glowLayer.addIncludedOnlyMesh(mesh);
+  powerUps.push({ mesh, mat, type, age: 0 });
+}
+
+function updatePowerUps(dt) {
+  for (let i = powerUps.length - 1; i >= 0; i--) {
+    const pu = powerUps[i];
+    pu.age += dt;
+    // Rotate and bob
+    pu.mesh.rotation.y += dt * 2;
+    pu.mesh.rotation.x += dt * 0.5;
+    pu.mesh.position.y += Math.sin(performance.now() * 0.003 + i) * 0.003;
+    // Expire after 15s
+    if (pu.age > 15) {
+      glowLayer.removeIncludedOnlyMesh(pu.mesh);
+      pu.mesh.dispose(); pu.mat.dispose();
+      powerUps.splice(i, 1);
+    }
+  }
+}
+
+function checkPowerUpGaze(ray) {
+  // Check if gaze ray is near any power-up (simple distance-to-ray check)
+  for (let i = powerUps.length - 1; i >= 0; i--) {
+    const pu = powerUps[i];
+    const toP = pu.mesh.position.subtract(ray.origin);
+    const proj = BABYLON.Vector3.Dot(toP, ray.direction);
+    if (proj < 0) continue;
+    const closest = ray.origin.add(ray.direction.scale(proj));
+    const dist = pu.mesh.position.subtract(closest).length();
+    if (dist < 0.8) return i; // close enough to gaze
+  }
+  return -1;
+}
+
+function collectPowerUp(index) {
+  const pu = powerUps[index];
+  const type = pu.type;
+  const cfg = POWERUP_TYPES[type];
+  STATE.activePowerUps[type] = { remaining: cfg.duration };
+  if (type === 'SHIELD') STATE.shielded = true;
+  glowLayer.removeIncludedOnlyMesh(pu.mesh);
+  pu.mesh.dispose(); pu.mat.dispose();
+  powerUps.splice(index, 1);
+  playPowerUpCollect();
+  updateHUD();
+}
+
+function updateActivePowerUps(dt) {
+  for (const [type, pu] of Object.entries(STATE.activePowerUps)) {
+    pu.remaining -= dt;
+    if (pu.remaining <= 0) {
+      delete STATE.activePowerUps[type];
+      if (type === 'SHIELD') STATE.shielded = false;
+    }
+  }
+  // Shield visual
+  shieldSphere.isVisible = STATE.shielded;
+  if (STATE.shielded) shieldMat.alpha = 0.15 + 0.05 * Math.sin(performance.now() * 0.005);
+  // Time scale
+  STATE.timeScale = STATE.activePowerUps.TIME_SLOW ? 0.3 : 1.0;
+}
+
+function getDwellTime(enemyType) {
+  let base = ENEMY_TYPES[enemyType]?.dwellTime || 1.2;
+  if (STATE.activePowerUps.RAPID_FIRE) base *= 0.35;
+  return base;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// BOSS SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const bossMat = new BABYLON.StandardMaterial("bossMat", scene);
+bossMat.emissiveColor = new BABYLON.Color3(0.8, 0.1, 0.1);
+bossMat.disableLighting = true;
+const weakPointMat = new BABYLON.StandardMaterial("wpMat", scene);
+weakPointMat.emissiveColor = new BABYLON.Color3(0, 1, 0.8);
+weakPointMat.disableLighting = true;
+const weakPointDimMat = new BABYLON.StandardMaterial("wpDimMat", scene);
+weakPointDimMat.emissiveColor = new BABYLON.Color3(0.2, 0.2, 0.2);
+weakPointDimMat.disableLighting = true;
+
+function spawnBoss() {
+  const bossLevel = Math.floor(STATE.wave / CONFIG.BOSS_WAVE_INTERVAL);
+  const mesh = BABYLON.MeshBuilder.CreateIcoSphere("boss", { radius: 2.5, subdivisions: 3 }, scene);
+  mesh.material = bossMat;
+  mesh.position.set(0, 0, -CONFIG.BOSS_ORBIT_RADIUS);
+  const weakPoints = [];
+  for (let i = 0; i < 3; i++) {
+    const wp = BABYLON.MeshBuilder.CreateSphere("wp" + i, { diameter: 0.5 }, scene);
+    wp.parent = mesh;
+    const theta = (i / 3) * Math.PI * 2;
+    wp.position.set(Math.cos(theta) * 2.2, Math.sin(theta) * 1.5, 0);
+    wp.material = i === 0 ? weakPointMat : weakPointDimMat;
+    glowLayer.addIncludedOnlyMesh(wp);
+    weakPoints.push(wp);
+  }
+  // Health bar
+  const hpBg = BABYLON.MeshBuilder.CreatePlane("bossHpBg", { width: 3, height: 0.2 }, scene);
+  const hpBgMat = new BABYLON.StandardMaterial("hpBgMat", scene);
+  hpBgMat.emissiveColor = new BABYLON.Color3(0.15, 0.15, 0.15);
+  hpBgMat.disableLighting = true;
+  hpBgMat.backFaceCulling = false;
+  hpBg.material = hpBgMat;
+  hpBg.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  hpBg.isPickable = false;
+  const hpFill = BABYLON.MeshBuilder.CreatePlane("bossHpFill", { width: 2.9, height: 0.15 }, scene);
+  const hpFillMat = new BABYLON.StandardMaterial("hpFillMat", scene);
+  hpFillMat.emissiveColor = new BABYLON.Color3(1, 0.2, 0.2);
+  hpFillMat.disableLighting = true;
+  hpFillMat.backFaceCulling = false;
+  hpFill.material = hpFillMat;
+  hpFill.parent = hpBg;
+  hpFill.position.z = -0.01;
+
+  const totalHp = 8 + bossLevel * 4;
+  STATE.boss = {
+    mesh, weakPoints, hpBg, hpFill, hpFillMat,
+    hp: totalHp, maxHp: totalHp,
+    activeWP: 0, orbitAngle: 0, chargeTimer: 0,
+    minionTimer: 0, phase: 0,
+  };
+  STATE.bossActive = true;
+  startBossMusic();
+}
+
+function updateBoss(dt) {
+  if (!STATE.bossActive || !STATE.boss) return;
+  const boss = STATE.boss;
+  const tdt = dt * STATE.timeScale;
+  // Orbit
+  boss.orbitAngle += tdt * 0.3;
+  const orbitR = CONFIG.BOSS_ORBIT_RADIUS;
+  boss.mesh.position.x = Math.sin(boss.orbitAngle) * orbitR;
+  boss.mesh.position.z = Math.cos(boss.orbitAngle) * orbitR;
+  boss.mesh.position.y = Math.sin(boss.orbitAngle * 0.7) * 3;
+  boss.mesh.rotation.y += tdt * 0.5;
+  // Health bar position
+  boss.hpBg.position = boss.mesh.position.add(new BABYLON.Vector3(0, 4, 0));
+  const ratio = boss.hp / boss.maxHp;
+  boss.hpFill.scaling.x = Math.max(ratio, 0.001);
+  boss.hpFill.position.x = -(1 - ratio) * 1.45;
+  boss.hpFillMat.emissiveColor = ratio > 0.5
+    ? new BABYLON.Color3(1, 0.2, 0.2)
+    : ratio > 0.25 ? new BABYLON.Color3(1, 0.6, 0) : new BABYLON.Color3(1, 1, 0);
+  // Weak point visibility
+  for (let i = 0; i < boss.weakPoints.length; i++) {
+    boss.weakPoints[i].material = i === boss.activeWP ? weakPointMat : weakPointDimMat;
+  }
+  // Spawn minions periodically
+  boss.minionTimer += tdt;
+  if (boss.minionTimer > 5) {
+    boss.minionTimer = 0;
+    for (let i = 0; i < 2; i++) {
+      const offset = new BABYLON.Vector3((Math.random()-0.5)*4, (Math.random()-0.5)*4, (Math.random()-0.5)*4);
+      spawnEnemy('BASIC', boss.mesh.position.add(offset));
+    }
+  }
+}
+
+function damageBoss() {
+  if (!STATE.boss) return;
+  STATE.boss.hp--;
+  STATE.boss.activeWP = (STATE.boss.activeWP + 1) % 3;
+  triggerShake(0.12);
+  playLaserFire();
+  playExplosion(1.5);
+  // Fire bolt at boss
+  fireLaserBolt(STATE.boss.mesh.position.clone());
+  if (STATE.boss.hp <= 0) {
+    // Boss destroyed
+    explodeEnemy(STATE.boss.mesh.position.clone(), 'BOSS');
+    playExplosion(2.0);
+    STATE.score += 200 * STATE.wave;
+    STATE.totalKills++;
+    triggerShake(0.25);
+    // Cleanup
+    STATE.boss.weakPoints.forEach(wp => { glowLayer.removeIncludedOnlyMesh(wp); wp.dispose(); });
+    STATE.boss.mesh.dispose();
+    STATE.boss.hpBg.dispose();
+    STATE.boss = null;
+    STATE.bossActive = false;
+    stopBossMusic();
+    updateHUD();
+  }
+}
+
+function checkBossGaze(ray) {
+  if (!STATE.bossActive || !STATE.boss) return false;
+  const boss = STATE.boss;
+  const activeWP = boss.weakPoints[boss.activeWP];
+  // World position of active weak point
+  const wpWorldPos = BABYLON.Vector3.TransformCoordinates(
+    activeWP.position, boss.mesh.getWorldMatrix()
+  );
+  // Distance from ray to weak point
+  const toWP = wpWorldPos.subtract(ray.origin);
+  const proj = BABYLON.Vector3.Dot(toWP, ray.direction);
+  if (proj < 0) return false;
+  const closest = ray.origin.add(ray.direction.scale(proj));
+  const dist = wpWorldPos.subtract(closest).length();
+  return dist < 1.0;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// COMBO SYSTEM
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function getComboMultiplier() {
+  return 1 + Math.floor(STATE.combo.count / 3) * 0.5;
+}
+
+function showComboText() {
+  if (STATE.combo.count < 3 || !STATE.lastKillPos) return;
+  const plane = BABYLON.MeshBuilder.CreatePlane("combo" + Date.now(), { width: 2.5, height: 0.6 }, scene);
+  const dt = new BABYLON.DynamicTexture("comboTex", { width: 256, height: 64 }, scene);
+  const ctx = dt.getContext();
+  ctx.font = "bold 42px 'Courier New'";
+  ctx.fillStyle = "#ffcc00";
+  ctx.textAlign = "center";
+  ctx.fillText(`${STATE.combo.count}x COMBO`, 128, 45);
+  dt.update();
+  const mat = new BABYLON.StandardMaterial("comboMat", scene);
+  mat.diffuseTexture = dt; mat.emissiveTexture = dt; mat.opacityTexture = dt;
+  mat.backFaceCulling = false; mat.disableLighting = true;
+  plane.material = mat;
+  plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  plane.position = STATE.lastKillPos.clone();
+  plane.position.y += 1.5;
+  plane.isPickable = false;
+  const anim = new BABYLON.Animation("comboUp", "position.y", 30, BABYLON.Animation.ANIMATIONTYPE_FLOAT);
+  anim.setKeys([
+    { frame: 0, value: plane.position.y },
+    { frame: 40, value: plane.position.y + 2.5 }
+  ]);
+  const fadeAnim = new BABYLON.Animation("comboFade", "material.alpha", 30, BABYLON.Animation.ANIMATIONTYPE_FLOAT);
+  fadeAnim.setKeys([
+    { frame: 0, value: 1 }, { frame: 25, value: 1 }, { frame: 40, value: 0 }
+  ]);
+  plane.animations = [anim, fadeAnim];
+  scene.beginAnimation(plane, 0, 40, false, 1, () => {
+    plane.dispose(); dt.dispose(); mat.dispose();
+  });
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// WAVE ANNOUNCEMENT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function announceWave(waveNum) {
+  const isBoss = waveNum % CONFIG.BOSS_WAVE_INTERVAL === 0 && waveNum > 0;
+  const plane = BABYLON.MeshBuilder.CreatePlane("waveAnnounce", { width: 4, height: 1.2 }, scene);
+  const dt = new BABYLON.DynamicTexture("waveTex", { width: 512, height: 150 }, scene);
+  const ctx = dt.getContext();
+  ctx.textAlign = "center";
+  ctx.font = "bold 64px 'Courier New'";
+  ctx.fillStyle = isBoss ? "#ff4444" : "#00ffcc";
+  ctx.fillText(`WAVE ${waveNum}`, 256, 70);
+  if (isBoss) {
+    ctx.font = "bold 36px 'Courier New'";
+    ctx.fillStyle = "#ff6644";
+    ctx.fillText("⚠ BOSS INCOMING ⚠", 256, 120);
+  }
+  dt.update();
+  const mat = new BABYLON.StandardMaterial("waveMat", scene);
+  mat.diffuseTexture = dt; mat.emissiveTexture = dt; mat.opacityTexture = dt;
+  mat.backFaceCulling = false; mat.disableLighting = true; mat.alpha = 0;
+  plane.material = mat;
+  plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+  plane.isPickable = false;
+  const forward = camera.getForwardRay().direction;
+  plane.position = camera.position.add(forward.scale(6));
+  const anim = new BABYLON.Animation("waveAlpha", "material.alpha", 30, BABYLON.Animation.ANIMATIONTYPE_FLOAT);
+  anim.setKeys([
+    { frame: 0, value: 0 }, { frame: 10, value: 1 },
+    { frame: 55, value: 1 }, { frame: 65, value: 0 }
+  ]);
+  plane.animations = [anim];
+  scene.beginAnimation(plane, 0, 65, false, 1, () => {
+    plane.dispose(); dt.dispose(); mat.dispose();
+  });
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// SCREEN SHAKE + DAMAGE FEEDBACK
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function triggerShake(intensity) {
+  STATE.shake.intensity = Math.min(Math.max(STATE.shake.intensity, intensity), 0.3);
+}
+
+function updateShake() {
+  if (STATE.shake.intensity > 0.001) {
+    cockpitRoot.position.x = (Math.random() - 0.5) * STATE.shake.intensity;
+    cockpitRoot.position.y = (Math.random() - 0.5) * STATE.shake.intensity;
+    STATE.shake.intensity *= STATE.shake.decay;
+  } else {
+    cockpitRoot.position.x = 0;
+    cockpitRoot.position.y = 0;
+  }
+}
+
+let cockpitFlashTimer = 0;
+function flashCockpitDamage() {
+  cockpitMat.emissiveColor = new BABYLON.Color3(1, 0, 0);
+  cockpitFlashTimer = 0.5;
+}
+
+function updateCockpitFlash(dt) {
+  if (cockpitFlashTimer > 0) {
+    cockpitFlashTimer -= dt;
+    const t = Math.max(0, cockpitFlashTimer) / 0.5;
+    cockpitMat.emissiveColor = BABYLON.Color3.Lerp(cockpitOriginalColor, new BABYLON.Color3(1, 0, 0), t);
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// WAVE MANAGEMENT
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function getWaveConfig(wave) {
+  return {
+    enemyCount: Math.min(Math.floor(3 + wave * 1.5), 25),
+    spawnInterval: Math.max(0.7, 2.2 - wave * 0.12),
+    speedMultiplier: 1 + wave * 0.08,
+    isBossWave: wave % CONFIG.BOSS_WAVE_INTERVAL === 0 && wave > 0,
+  };
+}
+
+function startWave() {
+  STATE.waveConfig = getWaveConfig(STATE.wave);
+  STATE.spawnTimer = 0;
+  STATE.spawnedThisWave = 0;
+  announceWave(STATE.wave);
+  if (STATE.waveConfig.isBossWave) {
+    setTimeout(() => { if (STATE.gameActive) spawnBoss(); }, 2200);
+  }
+  updateHUD();
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// LOSE LIFE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function loseLifeFromEnemy(type, idx) {
+  if (STATE.shielded) {
+    STATE.shielded = false;
+    delete STATE.activePowerUps.SHIELD;
+    triggerShake(0.1);
+    playDamage();
+    // Remove the enemy that hit
+    const p = enemySPSMap[type].sps.particles[idx];
+    p.isVisible = false; p.position.set(0, -999, 0); p.scaling.set(0, 0, 0);
+    enemyData[type][idx].active = false;
+    enemySPSMap[type].activeCount--;
+    updateHUD();
+    return;
+  }
+  // Remove enemy
+  const p = enemySPSMap[type].sps.particles[idx];
+  p.isVisible = false; p.position.set(0, -999, 0); p.scaling.set(0, 0, 0);
+  enemyData[type][idx].active = false;
+  enemySPSMap[type].activeCount--;
+
+  STATE.lives--;
+  triggerShake(0.2);
+  flashCockpitDamage();
+  playDamage();
+  updateHUD();
+  if (STATE.lives <= 0) endGame();
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MULTI-TARGET (power-up)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function multiTargetKill(gazeDir) {
+  if (!STATE.activePowerUps.MULTI_TARGET) return;
+  let hits = 0;
+  for (const [type, spsInfo] of Object.entries(enemySPSMap)) {
+    if (hits >= 2) break;
+    const data = enemyData[type];
+    for (let i = 0; i < data.length; i++) {
+      if (hits >= 2) break;
+      if (!data[i].active) continue;
+      const p = spsInfo.sps.particles[i];
+      const toEnemy = p.position.subtract(camera.position).normalize();
+      const angle = Math.acos(Math.max(-1, Math.min(1, BABYLON.Vector3.Dot(gazeDir, toEnemy))));
+      if (angle < 0.5 && angle > 0.05) { // within ~30 degrees but not the primary target
+        damageEnemyAt(type, i);
+        hits++;
+      }
+    }
+  }
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// HIGH SCORE
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+function getHighScore() {
+  return parseInt(localStorage.getItem('gazeShooterHighScore') || '0', 10);
+}
+function setHighScore(score) {
+  const current = getHighScore();
+  if (score > current) {
+    localStorage.setItem('gazeShooterHighScore', score.toString());
+    return true;
+  }
+  return false;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MAIN GAME LOOP
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+let gazeOnPowerUp = -1;
+let gazePowerUpTimer = 0;
+
+scene.registerBeforeRender(() => {
+  // Update stars twinkle
+  starSPS.setParticles();
+
+  if (!STATE.gameActive) return;
+  const rawDt = engine.getDeltaTime() / 1000;
+  const dt = rawDt;
+  const gameDt = dt * STATE.timeScale;
+
+  // Update power-ups
+  updateActivePowerUps(dt);
+  updatePowerUps(dt);
+  updateShake();
+  updateCockpitFlash(dt);
+  updateBoss(dt);
+
+  // Combo timer
+  if (STATE.combo.timer > 0) {
+    STATE.combo.timer -= dt;
+    if (STATE.combo.timer <= 0) { STATE.combo.count = 0; updateHUD(); }
+  }
+
+  // Spawn enemies
+  if (STATE.waveConfig && STATE.spawnedThisWave < STATE.waveConfig.enemyCount && !STATE.waveConfig.isBossWave) {
+    STATE.spawnTimer += gameDt;
+    if (STATE.spawnTimer >= STATE.waveConfig.spawnInterval) {
+      spawnEnemy(selectEnemyType(STATE.wave));
+      STATE.spawnedThisWave++;
+      STATE.spawnTimer = 0;
+    }
+  }
+
+  // Boss waves: spawn fewer regular enemies
+  if (STATE.waveConfig && STATE.waveConfig.isBossWave && STATE.spawnedThisWave < 3) {
+    STATE.spawnTimer += gameDt;
+    if (STATE.spawnTimer >= 3.0) {
+      spawnEnemy(selectEnemyType(STATE.wave));
+      STATE.spawnedThisWave++;
+      STATE.spawnTimer = 0;
+    }
+  }
+
+  // Update enemy positions + check collisions
+  let closestEnemyDist = Infinity;
+  for (const [type, spsInfo] of Object.entries(enemySPSMap)) {
+    const data = enemyData[type];
+    const cfg = ENEMY_TYPES[type];
+    const sps = spsInfo.sps;
+    let needsUpdate = false;
+
+    for (let i = 0; i < data.length; i++) {
+      if (!data[i].active) continue;
+      needsUpdate = true;
+      const p = sps.particles[i];
+      const dir = BABYLON.Vector3.Zero().subtract(p.position).normalize();
+      const speed = cfg.speed * data[i].speedMult * STATE.waveConfig.speedMultiplier * 1.8 * gameDt;
+
+      if (type === 'ZIGZAG') {
+        const perp = BABYLON.Vector3.Cross(dir, BABYLON.Axis.Y).normalize();
+        const zig = perp.scale(Math.sin(performance.now() * 0.004 + data[i].phase) * 2.5 * gameDt);
+        p.position.addInPlace(dir.scale(speed)).addInPlace(zig);
+      } else {
+        p.position.addInPlace(dir.scale(speed));
+      }
+      p.rotation.y += 1.2 * gameDt;
+
+      const dist = p.position.length();
+      if (dist < closestEnemyDist) closestEnemyDist = dist;
+      if (dist < 1.5) {
+        loseLifeFromEnemy(type, i);
+        needsUpdate = true;
+      }
+    }
+
+    if (needsUpdate || spsInfo.activeCount > 0) {
+      sps.setParticles();
+    }
+  }
+
+  // Proximity warning
+  if (closestEnemyDist < CONFIG.PROXIMITY_WARN_DIST) {
+    playProximityBeep(closestEnemyDist);
+  }
+
+  // Check wave complete
+  const totalEnemies = getTotalActiveEnemies();
+  const doneSpawning = STATE.waveConfig &&
+    (STATE.waveConfig.isBossWave ? !STATE.bossActive : STATE.spawnedThisWave >= STATE.waveConfig.enemyCount);
+  if (totalEnemies === 0 && doneSpawning && !STATE.bossActive && STATE.gameActive) {
+    STATE.wave++;
     startWave();
   }
+
   // Gaze raycasting
   const ray = camera.getForwardRay(100);
-  const hit = scene.pickWithRay(ray, m => m.name.startsWith("enemy"));
-  if (hit?.pickedMesh) {
-    if (hit.pickedMesh === gazeTarget) {
-      gazeDuration += dt;
-      if (gazeDuration >= DWELL_TIME) killEnemy(gazeTarget);
+
+  // Check power-up gaze first
+  const puIdx = checkPowerUpGaze(ray);
+  if (puIdx >= 0) {
+    if (gazeOnPowerUp === puIdx) {
+      gazePowerUpTimer += dt;
+      if (gazePowerUpTimer >= CONFIG.POWERUP_COLLECT_DWELL) {
+        collectPowerUp(puIdx);
+        gazeOnPowerUp = -1;
+        gazePowerUpTimer = 0;
+      }
     } else {
-      gazeTarget = hit.pickedMesh;
-      gazeDuration = 0;
+      gazeOnPowerUp = puIdx;
+      gazePowerUpTimer = 0;
     }
-    updateReticle(gazeDuration);
+    updateReticle(gazePowerUpTimer / CONFIG.POWERUP_COLLECT_DWELL, null);
+    return;
+  }
+  gazeOnPowerUp = -1;
+  gazePowerUpTimer = 0;
+
+  // Check boss weak point
+  if (STATE.bossActive && checkBossGaze(ray)) {
+    if (STATE.gazeTargetType === 'BOSS') {
+      STATE.gazeDuration += dt;
+      const bossDwell = getDwellTime('BASIC'); // use basic dwell for boss
+      if (STATE.gazeDuration >= bossDwell) {
+        damageBoss();
+        STATE.gazeDuration = 0;
+        stopGazeCharge();
+        STATE.gazeChargeOsc = playGazeCharge(bossDwell);
+      }
+    } else {
+      STATE.gazeTargetType = 'BOSS';
+      STATE.gazeTargetIdx = -1;
+      STATE.gazeDuration = 0;
+      STATE.gazeAttempts++;
+      stopGazeCharge();
+      STATE.gazeChargeOsc = playGazeCharge(getDwellTime('BASIC'));
+    }
+    updateReticle(STATE.gazeDuration / getDwellTime('BASIC'), 'BASIC');
+    return;
+  }
+
+  // Check enemies via SPS picking
+  let closestHit = null;
+  let closestDist = Infinity;
+
+  for (const [type, spsInfo] of Object.entries(enemySPSMap)) {
+    if (spsInfo.activeCount === 0) continue;
+    const pick = scene.pickWithRay(ray, m => m === spsInfo.mesh);
+    if (pick?.hit && pick.distance < closestDist) {
+      const pickedP = spsInfo.sps.pickedParticle(pick);
+      if (pickedP && spsInfo.sps.particles[pickedP.idx].isVisible && enemyData[type][pickedP.idx].active) {
+        closestHit = { type, idx: pickedP.idx, distance: pick.distance };
+        closestDist = pick.distance;
+      }
+    }
+  }
+
+  if (closestHit) {
+    if (closestHit.type === STATE.gazeTargetType && closestHit.idx === STATE.gazeTargetIdx) {
+      STATE.gazeDuration += dt;
+      const dwell = getDwellTime(closestHit.type);
+      if (STATE.gazeDuration >= dwell) {
+        const killed = damageEnemyAt(closestHit.type, closestHit.idx);
+        if (killed) {
+          showComboText();
+          multiTargetKill(ray.direction);
+        }
+        STATE.gazeTarget = null;
+        STATE.gazeTargetType = null;
+        STATE.gazeTargetIdx = -1;
+        STATE.gazeDuration = 0;
+        stopGazeCharge();
+      }
+      updateReticle(STATE.gazeDuration / dwell, closestHit.type);
+    } else {
+      STATE.gazeTargetType = closestHit.type;
+      STATE.gazeTargetIdx = closestHit.idx;
+      STATE.gazeDuration = 0;
+      STATE.gazeAttempts++;
+      stopGazeCharge();
+      STATE.gazeChargeOsc = playGazeCharge(getDwellTime(closestHit.type));
+      updateReticle(0, closestHit.type);
+    }
   } else {
-    gazeTarget = null;
-    gazeDuration = 0;
-    updateReticle(0);
+    if (STATE.gazeTargetType) stopGazeCharge();
+    STATE.gazeTarget = null;
+    STATE.gazeTargetType = null;
+    STATE.gazeTargetIdx = -1;
+    STATE.gazeDuration = 0;
+    updateReticle(0, null);
   }
 });
-// ─── RENDER LOOP ─────────────────────────────────────────────
-engine.runRenderLoop(() => scene.render());
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// RENDER LOOP
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+const fpsEl = document.getElementById('fpsCounter');
+engine.runRenderLoop(() => {
+  scene.render();
+  fpsEl.textContent = engine.getFps().toFixed(0) + " FPS";
+});
 window.addEventListener('resize', () => engine.resize());
-// ─── GAME FLOW ───────────────────────────────────────────────
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// GAME FLOW
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Show high score on start screen
+const hs = getHighScore();
+const hsEl = document.getElementById('startHighScore');
+if (hs > 0) hsEl.textContent = `HIGH SCORE: ${hs}`;
+
 async function startGame() {
-  // iOS 13+ gyro permission — don't block game if denied (mouse still works)
+  // iOS gyro permission
   if (typeof DeviceOrientationEvent?.requestPermission === 'function') {
     try {
       const perm = await DeviceOrientationEvent.requestPermission();
-      if (perm !== 'granted') {
-        console.warn('Gyro permission denied — mouse/touch control only');
-      }
+      if (perm !== 'granted') console.warn('Gyro denied — mouse/touch only');
     } catch(e) { console.warn('Permission error:', e); }
   }
-  // Wake lock to prevent screen sleep in headset
-  try {
-    if ('wakeLock' in navigator) await navigator.wakeLock.request('screen');
-  } catch(e) {}
+  // Wake lock
+  try { if ('wakeLock' in navigator) await navigator.wakeLock.request('screen'); } catch(e) {}
+  // Audio
+  initAudio();
+  startAmbientDrone();
+
+  // Hide UI
   document.getElementById('startScreen').style.display = 'none';
-  document.getElementById('hud').style.display = 'flex';
-  score = 0; wave = 1; lives = 3; enemies = [];
-  gameActive = true;
-  document.getElementById('scoreDisplay').textContent = 'SCORE: 0';
-  document.getElementById('waveDisplay').textContent = 'WAVE 1';
-  document.getElementById('livesDisplay').textContent = '❤️❤️❤️';
+
+  // Reset state
+  STATE.score = 0; STATE.wave = 1; STATE.lives = 3;
+  STATE.totalKills = 0; STATE.bestCombo = 0; STATE.gazeAttempts = 0;
+  STATE.combo = { count: 0, timer: 0 };
+  STATE.activePowerUps = {};
+  STATE.shielded = false;
+  STATE.bossActive = false; STATE.boss = null;
+  STATE.gazeTarget = null; STATE.gazeTargetType = null;
+  STATE.gazeTargetIdx = -1; STATE.gazeDuration = 0;
+  STATE.timeScale = 1.0;
+
+  // Clear all enemies
+  for (const [type, spsInfo] of Object.entries(enemySPSMap)) {
+    const data = enemyData[type];
+    for (let i = 0; i < data.length; i++) {
+      data[i].active = false;
+      spsInfo.sps.particles[i].isVisible = false;
+      spsInfo.sps.particles[i].position.set(0, -999, 0);
+      spsInfo.sps.particles[i].scaling.set(0, 0, 0);
+    }
+    spsInfo.activeCount = 0;
+    spsInfo.sps.setParticles();
+  }
+
+  // Clear power-ups
+  powerUps.forEach(pu => { glowLayer.removeIncludedOnlyMesh(pu.mesh); pu.mesh.dispose(); pu.mat.dispose(); });
+  powerUps.length = 0;
+
+  // Clean boss if any
+  if (STATE.boss) {
+    STATE.boss.weakPoints.forEach(wp => { glowLayer.removeIncludedOnlyMesh(wp); wp.dispose(); });
+    STATE.boss.mesh.dispose(); STATE.boss.hpBg.dispose();
+    STATE.boss = null;
+  }
+  stopBossMusic();
+
+  STATE.gameActive = true;
+  updateHUD();
   startWave();
 }
+
 function endGame() {
-  gameActive = false;
-  clearInterval(spawnInterval);
-  enemies.forEach(e => { if (!e.isDisposed()) e.dispose(); });
-  enemies = [];
-  document.getElementById('hud').style.display = 'none';
-  document.getElementById('finalScore').textContent = `Final Score: ${score} — Wave ${wave}`;
+  STATE.gameActive = false;
+  stopAmbientDrone();
+  stopBossMusic();
+  stopGazeCharge();
+
+  // Clean up enemies
+  for (const [type, spsInfo] of Object.entries(enemySPSMap)) {
+    const data = enemyData[type];
+    for (let i = 0; i < data.length; i++) {
+      if (data[i].active) {
+        explodeEnemy(spsInfo.sps.particles[i].position.clone(), type);
+      }
+      data[i].active = false;
+      spsInfo.sps.particles[i].isVisible = false;
+      spsInfo.sps.particles[i].position.set(0, -999, 0);
+      spsInfo.sps.particles[i].scaling.set(0, 0, 0);
+    }
+    spsInfo.activeCount = 0;
+    spsInfo.sps.setParticles();
+  }
+
+  // Clean boss
+  if (STATE.boss) {
+    STATE.boss.weakPoints.forEach(wp => { glowLayer.removeIncludedOnlyMesh(wp); wp.dispose(); });
+    STATE.boss.mesh.dispose(); STATE.boss.hpBg.dispose();
+    STATE.boss = null; STATE.bossActive = false;
+  }
+
+  // Clean power-ups
+  powerUps.forEach(pu => { glowLayer.removeIncludedOnlyMesh(pu.mesh); pu.mesh.dispose(); pu.mat.dispose(); });
+  powerUps.length = 0;
+
+  // High score
+  const isNewRecord = setHighScore(STATE.score);
+
+  // Show game over
+  const accuracy = STATE.gazeAttempts > 0 ? Math.floor((STATE.totalKills / STATE.gazeAttempts) * 100) : 0;
+  document.getElementById('gameStats').innerHTML =
+    `Final Score: ${STATE.score}<br/>` +
+    `Waves Survived: ${STATE.wave}<br/>` +
+    `Enemies Destroyed: ${STATE.totalKills}<br/>` +
+    `Best Combo: ${STATE.bestCombo}x<br/>` +
+    `Accuracy: ${accuracy}%`;
+  document.getElementById('newRecord').style.display = isNewRecord ? 'block' : 'none';
   document.getElementById('gameOver').style.display = 'flex';
 }
+
 document.getElementById('startBtn').addEventListener('click', startGame);
 document.getElementById('restartBtn').addEventListener('click', () => {
   document.getElementById('gameOver').style.display = 'none';
   startGame();
 });
+
+})();
 </script>
 </body>
 </html>
